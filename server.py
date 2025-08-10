@@ -44,10 +44,18 @@ sendgrid_client = SendGridAPIClient(api_key=SENDGRID_API_KEY) if SENDGRID_API_KE
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
+# MongoDB connection - FIXED
+mongo_url = os.getenv('MONGO_URL')
+if not mongo_url:
+    raise ValueError("MONGO_URL environment variable is required")
+
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+
+db_name = os.getenv('DB_NAME')
+if not db_name:
+    raise ValueError("DB_NAME environment variable is required")
+
+db = client[db_name]
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -659,8 +667,5 @@ async def get_subscription_info(current_user: dict = Depends(get_current_user)):
     
     return {"has_active_subscription": False}
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8001, reload=True)
 # Add this at the very end of the file
 app = app  # This ensures the app variable is available for Vercel
