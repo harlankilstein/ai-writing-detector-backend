@@ -378,7 +378,7 @@ async def forgot_password(request: ForgotPasswordRequest):
     # Send password reset email
     if sendgrid_client:
         try:
-            reset_link = f"http://localhost:3000/reset-password?token={reset_token}"  # Will be configurable later
+            reset_link = f"https://ai-writing-detector.onrender.com/reset-password?token={reset_token}"
             
             message = Mail(
                 from_email=FROM_EMAIL,
@@ -661,3 +661,5 @@ async def get_subscription_info(current_user: dict = Depends(get_current_user)):
 
 if __name__ == "__main__":
     import uvicorn
+    uvicorn.run("server:app", host="0.0.0.0", port=8001, reload=True)
+
