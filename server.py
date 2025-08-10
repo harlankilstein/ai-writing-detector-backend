@@ -662,4 +662,5 @@ async def get_subscription_info(current_user: dict = Depends(get_current_user)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("server:app", host="0.0.0.0", port=8001, reload=True)
-
+# Add this at the very end of the file
+app = app  # This ensures the app variable is available for Vercel
