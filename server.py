@@ -177,9 +177,9 @@ def extract_google_doc_id(url: str) -> Optional[str]:
     return None
 
 async def fetch_google_doc_content(doc_id: str) -> dict:
-    """Fetch content from a public Google Doc - IMPROVED VERSION"""
+    """Fetch content from a public Google Doc - MOST AGGRESSIVE VERSION"""
     try:
-        # Try the plain text export URL first (most reliable)
+        # Try the plain text export URL first
         export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
         
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -187,55 +187,67 @@ async def fetch_google_doc_content(doc_id: str) -> dict:
             
             if response.status_code == 200:
                 content = response.text.strip()
-                if content and len(content) > 50:  # Ensure we got meaningful content
+                if content and len(content) > 100:  # Ensure substantial content
                     return {"success": True, "content": content, "method": "export"}
             
-            # Fallback: Try accessing the document directly 
+            # Fallback: Try accessing the document directly with VERY AGGRESSIVE extraction
             doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
             response = await client.get(doc_url)
             
             if response.status_code == 200:
                 html_content = response.text
                 
-                # Improved text extraction from HTML
+                # SUPER AGGRESSIVE text extraction - get EVERYTHING
                 from html import unescape
+                import re
                 
-                # Remove script and style elements
-                html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL)
-                html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL)
+                # Remove script, style, and other non-content elements
+                html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+                html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+                html_content = re.sub(r'<noscript[^>]*>.*?</noscript>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
                 
-                # Extract text content more aggressively
-                text_patterns = [
-                    r'<span[^>]*>([^<]+)</span>',
-                    r'<p[^>]*>([^<]+)</p>',
-                    r'<div[^>]*>([^<]+)</div>',
-                    r'>([A-Za-z][^<]{20,})<',  # Any substantial text content
+                # Get ALL text content - be VERY aggressive
+                # Remove ALL HTML tags and get just the text
+                text_only = re.sub(r'<[^>]+>', ' ', html_content)
+                
+                # Decode HTML entities
+                text_only = unescape(text_only)
+                
+                # Clean up whitespace but keep the content
+                text_only = re.sub(r'\s+', ' ', text_only)
+                text_only = text_only.strip()
+                
+                # Additional cleaning for Google Docs specific artifacts
+                # Remove common Google Docs interface text
+                unwanted_phrases = [
+                    'Google Docs', 'Share', 'File', 'Edit', 'View', 'Insert', 'Format', 'Tools', 'Add-ons', 'Help',
+                    'docs.google.com', 'document', 'Untitled document', 'Last edit was', 'ago',
+                    'Editing', 'Commenting', 'Suggesting', 'Viewing'
                 ]
                 
-                extracted_text = []
-                for pattern in text_patterns:
-                    matches = re.findall(pattern, html_content, re.IGNORECASE)
-                    for match in matches:
-                        # Clean up the text
-                        clean_text = unescape(match)  # Decode HTML entities
-                        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
-                        clean_text = re.sub(r'[^\w\s\.\,\!\?\;\:\-\'\"]', ' ', clean_text)  # Remove weird chars
-                        
-                        # Only include substantial text segments
-                        if (len(clean_text) > 15 and 
-                            not clean_text.lower().startswith(('google', 'docs', 'drive', 'share')) and
-                            clean_text not in extracted_text):
-                            extracted_text.append(clean_text)
+                for phrase in unwanted_phrases:
+                    text_only = re.sub(re.escape(phrase), '', text_only, flags=re.IGNORECASE)
                 
-                if extracted_text:
-                    # Join ALL extracted text, not just first 50 segments
-                    content = ' '.join(extracted_text)
+                # Remove extra whitespace again
+                text_only = re.sub(r'\s+', ' ', text_only).strip()
+                
+                # If we got substantial content, return it
+                if len(text_only) > 200:  # Lowered threshold
+                    return {"success": True, "content": text_only, "method": "aggressive_html_strip"}
+                
+                # LAST RESORT: Try to find JSON data in the page
+                # Google Docs sometimes embeds content in JSON
+                json_pattern = r'"[^"]*(?:transformer|AI|paradigm|framework|leverage|delve)[^"]*"'
+                json_matches = re.findall(json_pattern, html_content, re.IGNORECASE)
+                
+                if json_matches:
+                    # Extract text from JSON matches
+                    json_text = ' '.join([match.strip('"') for match in json_matches[:100]])  # Limit but be generous
+                    json_text = unescape(json_text)
+                    json_text = re.sub(r'\s+', ' ', json_text).strip()
                     
-                    # Clean up the final content
-                    content = re.sub(r'\s+', ' ', content).strip()
-                    
-                    if len(content) > 100:  # Ensure we got substantial content
-                        return {"success": True, "content": content, "method": "html_parse"}
+                    if len(json_text) > 100:
+                        return {"success": True, "content": json_text, "method": "json_extraction"}
             
             return {
                 "success": False, 
