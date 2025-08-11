@@ -161,6 +161,29 @@ async def send_email(to_email: str, subject: str, html_content: str):
         logger.error(f"Failed to send email to {to_email}: {str(e)}")
         return None
 
+async def send_template_email(to_email: str, template_id: str, dynamic_data: dict = None):
+    """Send email using SendGrid template"""
+    if not sendgrid_client:
+        logger.warning("SendGrid not configured, skipping template email send")
+        return
+    
+    try:
+        message = Mail(
+            from_email=(FROM_EMAIL, FROM_NAME),
+            to_emails=to_email
+        )
+        message.template_id = template_id
+        
+        if dynamic_data:
+            message.dynamic_template_data = dynamic_data
+            
+        response = sendgrid_client.send(message)
+        logger.info(f"Template email sent successfully to {to_email} using template {template_id}")
+        return response
+    except Exception as e:
+        logger.error(f"Failed to send template email to {to_email}: {str(e)}")
+        return None
+
 def extract_google_doc_id(url: str) -> Optional[str]:
     """Extract document ID from Google Docs URL"""
     patterns = [
@@ -414,43 +437,14 @@ async def signup(user_data: UserSignup):
     
     await db.users.insert_one(user_doc)
     
-    # Send welcome email
-    welcome_html = f"""
-    <div style="max-width: 600px; margin: 0 auto; font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-        <h2 style="color: #2563eb; margin-bottom: 20px;">Welcome to AI Writing Pattern Detector!</h2>
-        <p>Hi there,</p>
-        <p>Thanks for signing up! Your <strong>3-day free trial</strong> is now active.</p>
-        
-        <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
-            <h3 style="margin-top: 0; color: #1e40af;">During your trial, you have unlimited access to:</h3>
-            <ul style="margin: 10px 0;">
-                <li>Document analysis (TXT, DOC, DOCX, RTF)</li>
-                <li>Google Docs integration</li>
-                <li>Advanced AI pattern detection</li>
-                <li>Detailed analysis reports with confidence scores</li>
-            </ul>
-        </div>
-        
-        <p><strong>⏰ Your trial expires on {trial_expires.strftime('%B %d, %Y at %I:%M %p UTC')}</strong></p>
-        
-        <div style="text-align: center; margin: 30px 0;">
-            <a href="https://genuineaf.ai" style="background: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">Analyze Your First Document</a>
-        </div>
-        
-        <p>Best regards,<br>The AI Writing Detector Team</p>
-        
-        <hr style="margin: 30px 0; border: 1px solid #eee;">
-        <div style="font-size: 12px; color: #666; text-align: center;">
-            <p><strong>Questions or need help?</strong><br>
-            Contact us at <a href="mailto:support@genuineaf.ai" style="color: #2563eb;">support@genuineaf.ai</a></p>
-            
-            <p>AI Writing Detector | <a href="https://genuineaf.ai" style="color: #2563eb;">genuineaf.ai</a><br>
-            <a href="https://genuineaf.ai" style="color: #666; font-size: 10px;">Visit our website</a></p>
-        </div>
-    </div>
-    """
-    
-    await send_email(email, "Welcome to AI Writing Detector - Free Trial Started!", welcome_html)
+    # Send welcome email using SendGrid template
+    await send_template_email(
+        email, 
+        "d-1070bc39b3e741748d103ae177d8537a",  # GenuineAF Day 1 Welcome template
+        {
+            "trial_expires": trial_expires.strftime('%B %d, %Y at %I:%M %p UTC')
+        }
+    )
     
     # Create access token
     access_token = create_access_token(data={"user_id": user_id})
@@ -527,7 +521,7 @@ async def forgot_password(request: ForgotPasswordRequest):
     # Send password reset email
     if sendgrid_client:
         try:
-            reset_link = f"https://ai-writing-detector.onrender.com/reset-password?token={reset_token}"
+            reset_link = f"https://genuineaf.ai/reset-password?token={reset_token}"
             
             message = Mail(
                 from_email=FROM_EMAIL,
