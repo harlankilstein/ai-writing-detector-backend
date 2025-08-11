@@ -36,7 +36,7 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 
 # SendGrid configuration
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-FROM_EMAIL = os.getenv("FROM_EMAIL", "otcpublishing@gmail.com")
+FROM_EMAIL = os.getenv("FROM_EMAIL", "support@genuineaf.ai")
 FROM_NAME = os.getenv("FROM_NAME", "AI Writing Detector")
 sendgrid_client = SendGridAPIClient(api_key=SENDGRID_API_KEY) if SENDGRID_API_KEY else None
 
@@ -44,18 +44,10 @@ sendgrid_client = SendGridAPIClient(api_key=SENDGRID_API_KEY) if SENDGRID_API_KE
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
-# MongoDB connection - FIXED
-mongo_url = os.getenv('MONGO_URL')
-if not mongo_url:
-    raise ValueError("MONGO_URL environment variable is required")
-
+# MongoDB connection
+mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
-
-db_name = os.getenv('DB_NAME')
-if not db_name:
-    raise ValueError("DB_NAME environment variable is required")
-
-db = client[db_name]
+db = client[os.environ['DB_NAME']]
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -185,9 +177,9 @@ def extract_google_doc_id(url: str) -> Optional[str]:
     return None
 
 async def fetch_google_doc_content(doc_id: str) -> dict:
-    """Fetch content from a public Google Doc"""
+    """Fetch content from a public Google Doc - IMPROVED VERSION"""
     try:
-        # Try the plain text export URL
+        # Try the plain text export URL first (most reliable)
         export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
         
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -195,7 +187,7 @@ async def fetch_google_doc_content(doc_id: str) -> dict:
             
             if response.status_code == 200:
                 content = response.text.strip()
-                if content and len(content) > 10:
+                if content and len(content) > 50:  # Ensure we got meaningful content
                     return {"success": True, "content": content, "method": "export"}
             
             # Fallback: Try accessing the document directly 
@@ -205,27 +197,45 @@ async def fetch_google_doc_content(doc_id: str) -> dict:
             if response.status_code == 200:
                 html_content = response.text
                 
-                # Try to extract text content from HTML
-                # This is a basic extraction - in production you might want more sophisticated parsing
-                import re
+                # Improved text extraction from HTML
+                from html import unescape
                 
-                # Look for text content in common Google Docs patterns
+                # Remove script and style elements
+                html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL)
+                html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL)
+                
+                # Extract text content more aggressively
                 text_patterns = [
                     r'<span[^>]*>([^<]+)</span>',
-                    r'>([^<]{10,})<',  # Any text content longer than 10 characters
+                    r'<p[^>]*>([^<]+)</p>',
+                    r'<div[^>]*>([^<]+)</div>',
+                    r'>([A-Za-z][^<]{20,})<',  # Any substantial text content
                 ]
                 
                 extracted_text = []
                 for pattern in text_patterns:
-                    matches = re.findall(pattern, html_content)
+                    matches = re.findall(pattern, html_content, re.IGNORECASE)
                     for match in matches:
-                        clean_text = re.sub(r'\s+', ' ', match).strip()
-                        if len(clean_text) > 10 and clean_text not in extracted_text:
+                        # Clean up the text
+                        clean_text = unescape(match)  # Decode HTML entities
+                        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+                        clean_text = re.sub(r'[^\w\s\.\,\!\?\;\:\-\'\"]', ' ', clean_text)  # Remove weird chars
+                        
+                        # Only include substantial text segments
+                        if (len(clean_text) > 15 and 
+                            not clean_text.lower().startswith(('google', 'docs', 'drive', 'share')) and
+                            clean_text not in extracted_text):
                             extracted_text.append(clean_text)
                 
                 if extracted_text:
-                    content = ' '.join(extracted_text[:50])  # Limit to first 50 segments
-                    return {"success": True, "content": content, "method": "html_parse"}
+                    # Join ALL extracted text, not just first 50 segments
+                    content = ' '.join(extracted_text)
+                    
+                    # Clean up the final content
+                    content = re.sub(r'\s+', ' ', content).strip()
+                    
+                    if len(content) > 100:  # Ensure we got substantial content
+                        return {"success": True, "content": content, "method": "html_parse"}
             
             return {
                 "success": False, 
@@ -294,19 +304,38 @@ async def signup(user_data: UserSignup):
     
     # Send welcome email
     welcome_html = f"""
-    <h2>Welcome to AI Writing Pattern Detector!</h2>
-    <p>Hi there,</p>
-    <p>Thanks for signing up! Your 3-day free trial is now active.</p>
-    <p>During your trial, you have unlimited access to:</p>
-    <ul>
-        <li>Document analysis (TXT, DOC, DOCX, RTF)</li>
-        <li>Google Docs integration</li>
-        <li>Advanced AI pattern detection</li>
-        <li>Detailed analysis reports</li>
-    </ul>
-    <p>Your trial expires on <strong>{trial_expires.strftime('%B %d, %Y at %I:%M %p UTC')}</strong>.</p>
-    <p>Ready to get started? <a href="https://genuineaf.ai">Analyze your first document</a></p>
-    <p>Best regards,<br>The AI Writing Detector Team</p>
+    <div style="max-width: 600px; margin: 0 auto; font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+        <h2 style="color: #2563eb; margin-bottom: 20px;">Welcome to AI Writing Pattern Detector!</h2>
+        <p>Hi there,</p>
+        <p>Thanks for signing up! Your <strong>3-day free trial</strong> is now active.</p>
+        
+        <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
+            <h3 style="margin-top: 0; color: #1e40af;">During your trial, you have unlimited access to:</h3>
+            <ul style="margin: 10px 0;">
+                <li>Document analysis (TXT, DOC, DOCX, RTF)</li>
+                <li>Google Docs integration</li>
+                <li>Advanced AI pattern detection</li>
+                <li>Detailed analysis reports with confidence scores</li>
+            </ul>
+        </div>
+        
+        <p><strong>⏰ Your trial expires on {trial_expires.strftime('%B %d, %Y at %I:%M %p UTC')}</strong></p>
+        
+        <div style="text-align: center; margin: 30px 0;">
+            <a href="https://genuineaf.ai" style="background: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">Analyze Your First Document</a>
+        </div>
+        
+        <p>Best regards,<br>The AI Writing Detector Team</p>
+        
+        <hr style="margin: 30px 0; border: 1px solid #eee;">
+        <div style="font-size: 12px; color: #666; text-align: center;">
+            <p><strong>Questions or need help?</strong><br>
+            Contact us at <a href="mailto:support@genuineaf.ai" style="color: #2563eb;">support@genuineaf.ai</a></p>
+            
+            <p>AI Writing Detector | <a href="https://genuineaf.ai" style="color: #2563eb;">genuineaf.ai</a><br>
+            <a href="https://genuineaf.ai" style="color: #666; font-size: 10px;">Visit our website</a></p>
+        </div>
+    </div>
     """
     
     await send_email(email, "Welcome to AI Writing Detector - Free Trial Started!", welcome_html)
@@ -386,7 +415,7 @@ async def forgot_password(request: ForgotPasswordRequest):
     # Send password reset email
     if sendgrid_client:
         try:
-            reset_link = f"https://ai-writing-detector.onrender.com/reset-password?token={reset_token}"
+            reset_link = f"https://genuineaf.ai/reset-password?token={reset_token}"
             
             message = Mail(
                 from_email=FROM_EMAIL,
@@ -667,5 +696,6 @@ async def get_subscription_info(current_user: dict = Depends(get_current_user)):
     
     return {"has_active_subscription": False}
 
-# Add this at the very end of the file
-app = app  # This ensures the app variable is available for Vercel
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("server:app", host="0.0.0.0", port=8001, reload=True)
