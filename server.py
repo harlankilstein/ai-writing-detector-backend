@@ -36,7 +36,7 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 
 # SendGrid configuration
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-FROM_EMAIL = os.getenv("FROM_EMAIL", "support@genuineaf.ai")
+FROM_EMAIL = os.getenv("FROM_EMAIL", "otcpublishing@gmail.com")
 FROM_NAME = os.getenv("FROM_NAME", "AI Writing Detector")
 sendgrid_client = SendGridAPIClient(api_key=SENDGRID_API_KEY) if SENDGRID_API_KEY else None
 
@@ -176,83 +176,182 @@ def extract_google_doc_id(url: str) -> Optional[str]:
     
     return None
 
-async def fetch_google_doc_content(doc_id: str) -> dict:
-    """Fetch content from a public Google Doc - MOST AGGRESSIVE VERSION"""
+def extract_published_doc_content(html_content: str) -> Optional[str]:
+    """Extract text content from published Google Docs HTML"""
     try:
-        # Try the plain text export URL first
-        export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
+        # Look for content in published Google Docs structure
+        import re
+        from html import unescape
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(export_url)
+        # Remove script and style elements
+        html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Look for main content patterns in published docs
+        content_patterns = [
+            r'<div[^>]*class="[^"]*doc-content[^"]*"[^>]*>(.*?)</div>',
+            r'<div[^>]*id="contents"[^>]*>(.*?)</div>',
+            r'<div[^>]*class="[^"]*document[^"]*"[^>]*>(.*?)</div>',
+            r'<body[^>]*>(.*?)</body>'
+        ]
+        
+        extracted_content = ""
+        for pattern in content_patterns:
+            matches = re.findall(pattern, html_content, re.DOTALL | re.IGNORECASE)
+            if matches:
+                extracted_content = matches[0]
+                break
+        
+        if extracted_content:
+            # Extract text from HTML tags
+            text_content = re.sub(r'<[^>]+>', ' ', extracted_content)
+            # Clean up whitespace and decode HTML entities
+            text_content = unescape(text_content)
+            text_content = re.sub(r'\s+', ' ', text_content).strip()
             
-            if response.status_code == 200:
-                content = response.text.strip()
-                if content and len(content) > 100:  # Ensure substantial content
-                    return {"success": True, "content": content, "method": "export"}
-            
-            # Fallback: Try accessing the document directly with VERY AGGRESSIVE extraction
-            doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
-            response = await client.get(doc_url)
-            
-            if response.status_code == 200:
-                html_content = response.text
+            # Filter out very short content or navigation elements
+            if len(text_content) > 100:
+                return text_content
+        
+        return None
+    except Exception as e:
+        logger.warning(f"Error extracting published doc content: {str(e)}")
+        return None
+
+def extract_document_content_from_html(html_content: str) -> Optional[str]:
+    """Enhanced HTML parsing for Google Docs content with better content detection"""
+    try:
+        import re
+        from html import unescape
+        
+        # Remove script, style, and other non-content elements
+        html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        html_content = re.sub(r'<noscript[^>]*>.*?</noscript>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Enhanced patterns for Google Docs content extraction
+        content_patterns = [
+            # Google Docs specific content containers
+            r'<div[^>]*class="[^"]*kix-[^"]*"[^>]*>(.*?)</div>',
+            r'<span[^>]*class="[^"]*kix-[^"]*"[^>]*>([^<]+)</span>',
+            # General content patterns
+            r'<p[^>]*>([^<]+)</p>',
+            r'<div[^>]*>([^<]{20,})</div>',  # Divs with substantial text
+            r'<span[^>]*>([^<]{15,})</span>',  # Spans with meaningful content
+            # Fallback patterns
+            r'>([^<]{25,})<',  # Any substantial text between tags
+        ]
+        
+        extracted_texts = []
+        seen_texts = set()
+        
+        for pattern in content_patterns:
+            matches = re.findall(pattern, html_content, re.DOTALL)
+            for match in matches:
+                # Clean the text
+                if isinstance(match, tuple):
+                    text = match[0] if match else ""
+                else:
+                    text = match
                 
-                # SUPER AGGRESSIVE text extraction - get EVERYTHING
-                from html import unescape
-                import re
+                # Decode HTML entities and clean whitespace
+                clean_text = unescape(text)
+                clean_text = re.sub(r'\s+', ' ', clean_text).strip()
                 
-                # Remove script, style, and other non-content elements
-                html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
-                html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
-                html_content = re.sub(r'<noscript[^>]*>.*?</noscript>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
-                
-                # Get ALL text content - be VERY aggressive
-                # Remove ALL HTML tags and get just the text
-                text_only = re.sub(r'<[^>]+>', ' ', html_content)
-                
-                # Decode HTML entities
-                text_only = unescape(text_only)
-                
-                # Clean up whitespace but keep the content
-                text_only = re.sub(r'\s+', ' ', text_only)
-                text_only = text_only.strip()
-                
-                # Additional cleaning for Google Docs specific artifacts
-                # Remove common Google Docs interface text
-                unwanted_phrases = [
-                    'Google Docs', 'Share', 'File', 'Edit', 'View', 'Insert', 'Format', 'Tools', 'Add-ons', 'Help',
-                    'docs.google.com', 'document', 'Untitled document', 'Last edit was', 'ago',
-                    'Editing', 'Commenting', 'Suggesting', 'Viewing'
-                ]
-                
-                for phrase in unwanted_phrases:
-                    text_only = re.sub(re.escape(phrase), '', text_only, flags=re.IGNORECASE)
-                
-                # Remove extra whitespace again
-                text_only = re.sub(r'\s+', ' ', text_only).strip()
-                
-                # If we got substantial content, return it
-                if len(text_only) > 200:  # Lowered threshold
-                    return {"success": True, "content": text_only, "method": "aggressive_html_strip"}
-                
-                # LAST RESORT: Try to find JSON data in the page
-                # Google Docs sometimes embeds content in JSON
-                json_pattern = r'"[^"]*(?:transformer|AI|paradigm|framework|leverage|delve)[^"]*"'
-                json_matches = re.findall(json_pattern, html_content, re.IGNORECASE)
-                
-                if json_matches:
-                    # Extract text from JSON matches
-                    json_text = ' '.join([match.strip('"') for match in json_matches[:100]])  # Limit but be generous
-                    json_text = unescape(json_text)
-                    json_text = re.sub(r'\s+', ' ', json_text).strip()
+                # Filter criteria
+                if (len(clean_text) > 15 and 
+                    clean_text not in seen_texts and
+                    not re.match(r'^[\s\W]*$', clean_text) and  # Not just whitespace/punctuation
+                    'google' not in clean_text.lower()[:50] and  # Skip Google branding
+                    'docs' not in clean_text.lower()[:50]):
                     
-                    if len(json_text) > 100:
-                        return {"success": True, "content": json_text, "method": "json_extraction"}
+                    extracted_texts.append(clean_text)
+                    seen_texts.add(clean_text)
+                    
+                    # Limit extraction to prevent overwhelming content
+                    if len(extracted_texts) >= 100:
+                        break
+        
+        if extracted_texts:
+            # Join the extracted texts and limit total length
+            full_content = ' '.join(extracted_texts)
+            # Limit to reasonable size (about 10,000 characters)
+            if len(full_content) > 10000:
+                full_content = full_content[:10000] + "..."
+            
+            return full_content if len(full_content) > 50 else None
+        
+        return None
+        
+    except Exception as e:
+        logger.warning(f"Error in enhanced HTML content extraction: {str(e)}")
+        return None
+
+async def fetch_google_doc_content(doc_id: str) -> dict:
+    """Fetch content from a public Google Doc with improved extraction methods"""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Method 1: Try the plain text export URL (most reliable for public docs)
+            export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
+            
+            try:
+                response = await client.get(export_url, follow_redirects=True)
+                if response.status_code == 200:
+                    content = response.text.strip()
+                    # Check if content is actual text (not HTML redirect page)
+                    if content and len(content) >= 5 and not content.startswith('<HTML>'):
+                        logger.info(f"Successfully extracted {len(content)} characters using export method")
+                        return {"success": True, "content": content, "method": "export"}
+                    elif content.startswith('<HTML>'):
+                        logger.warning(f"Export returned HTML redirect page instead of text content")
+                elif response.status_code == 403:
+                    logger.warning(f"Document {doc_id} is not publicly accessible for export")
+                else:
+                    logger.warning(f"Export failed with status {response.status_code}")
+            except Exception as e:
+                logger.warning(f"Export method failed: {str(e)}")
+            
+            # Method 2: Try alternative export URLs
+            alt_export_urls = [
+                f"https://docs.google.com/document/d/{doc_id}/export?format=pdf",  # PDF fallback
+                f"https://docs.google.com/document/d/{doc_id}/pub"  # Published version
+            ]
+            
+            for alt_url in alt_export_urls:
+                try:
+                    response = await client.get(alt_url)
+                    if response.status_code == 200 and len(response.text) > 100:
+                        # For published docs, extract text content
+                        if "/pub" in alt_url:
+                            html_content = response.text
+                            # Look for actual document content in published version
+                            content = extract_published_doc_content(html_content)
+                            if content and len(content) > 50:
+                                logger.info(f"Successfully extracted {len(content)} characters from published version")
+                                return {"success": True, "content": content, "method": "published"}
+                except Exception:
+                    continue
+            
+            # Method 3: Enhanced HTML parsing with better content detection
+            doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
+            try:
+                response = await client.get(doc_url)
+                if response.status_code == 200:
+                    html_content = response.text
+                    content = extract_document_content_from_html(html_content)
+                    
+                    if content and len(content) > 50:
+                        logger.info(f"Successfully extracted {len(content)} characters using enhanced HTML parsing")
+                        return {"success": True, "content": content, "method": "enhanced_html_parse"}
+                    else:
+                        logger.warning(f"HTML parsing extracted insufficient content: {len(content) if content else 0} characters")
+            except Exception as e:
+                logger.warning(f"HTML parsing failed: {str(e)}")
             
             return {
                 "success": False, 
-                "error": "Document is not publicly accessible or doesn't exist",
-                "status_code": response.status_code
+                "error": "Document is not publicly accessible, doesn't exist, or content extraction failed",
+                "details": "Tried export, published, and HTML parsing methods"
             }
             
     except httpx.TimeoutException:
@@ -260,6 +359,7 @@ async def fetch_google_doc_content(doc_id: str) -> dict:
     except httpx.HTTPError as e:
         return {"success": False, "error": f"Network error: {str(e)}"}
     except Exception as e:
+        logger.error(f"Unexpected error in Google Docs extraction: {str(e)}")
         return {"success": False, "error": f"Unexpected error: {str(e)}"}
 
 def check_user_access(user: dict) -> bool:
@@ -427,7 +527,7 @@ async def forgot_password(request: ForgotPasswordRequest):
     # Send password reset email
     if sendgrid_client:
         try:
-            reset_link = f"https://genuineaf.ai/reset-password?token={reset_token}"
+            reset_link = f"https://ai-writing-detector.onrender.com/reset-password?token={reset_token}"
             
             message = Mail(
                 from_email=FROM_EMAIL,
