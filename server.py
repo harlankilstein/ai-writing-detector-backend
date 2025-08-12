@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 import re
 import httpx
 import asyncio
+import json
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from email_validator import validate_email, EmailNotValidError
@@ -202,6 +203,44 @@ async def add_contact_to_list(email: str, list_id: str):
     except Exception as e:
         logger.error(f"Failed to add contact {email} to list: {str(e)}")
         return None
+
+async def remove_contact_from_list(email: str, list_id: str):
+    """Remove contact from SendGrid marketing list"""
+    if not sendgrid_client:
+        logger.warning("SendGrid not configured, skipping contact list removal")
+        return
+    
+    try:
+        # First get the contact ID
+        search_response = sendgrid_client.client.marketing.contacts.search.post(request_body={"query": f"email='{email}'"})
+        search_result = json.loads(search_response.body)
+        
+        if search_result.get('result') and len(search_result['result']) > 0:
+            contact_id = search_result['result'][0]['id']
+            
+            # Remove contact from specific list
+            data = {"list_ids": [list_id]}
+            response = sendgrid_client.client.marketing.lists._(list_id).contacts.delete(
+                query_params={"contact_ids": contact_id}
+            )
+            logger.info(f"Contact {email} removed from SendGrid list {list_id}")
+            return response
+        else:
+            logger.warning(f"Contact {email} not found in SendGrid")
+    except Exception as e:
+        logger.error(f"Failed to remove contact {email} from list: {str(e)}")
+        return None
+
+async def move_user_to_buyers_list(email: str):
+    """Move user from trial list to buyers list and send welcome email"""
+    # Remove from trial list
+    await remove_contact_from_list(email, "5f1fce5f-ca63-4cc9-9ada-552d02cc662d")
+    
+    # Add to buyers list
+    await add_contact_to_list(email, "32980e0b-0368-4733-a56d-e15140daaa60")
+    
+    # Send buyer welcome email
+    await send_template_email(email, "d-1d524cfe53a6465c8d9086783d55a483")
 
 def extract_google_doc_id(url: str) -> Optional[str]:
     """Extract document ID from Google Docs URL"""
@@ -758,6 +797,9 @@ async def stripe_webhook(request: Request):
             # Get user for email
             user = await db.users.find_one({"id": user_id})
             if user:
+                # Move user to buyers list and send welcome email
+                await move_user_to_buyers_list(user['email'])
+                
                 # Send confirmation email
                 plan_name = "Business Plan" if subscription_status == "business" else "Pro Plan"
                 confirmation_html = f"""
