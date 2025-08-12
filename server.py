@@ -184,6 +184,25 @@ async def send_template_email(to_email: str, template_id: str, dynamic_data: dic
         logger.error(f"Failed to send template email to {to_email}: {str(e)}")
         return None
 
+async def add_contact_to_list(email: str, list_id: str):
+    """Add contact to SendGrid marketing list"""
+    if not sendgrid_client:
+        logger.warning("SendGrid not configured, skipping contact list add")
+        return
+    
+    try:
+        data = {
+            "list_ids": [list_id],
+            "contacts": [{"email": email}]
+        }
+        
+        response = sendgrid_client.client.marketing.contacts.put(request_body=data)
+        logger.info(f"Contact {email} added to SendGrid list {list_id}")
+        return response
+    except Exception as e:
+        logger.error(f"Failed to add contact {email} to list: {str(e)}")
+        return None
+
 def extract_google_doc_id(url: str) -> Optional[str]:
     """Extract document ID from Google Docs URL"""
     patterns = [
@@ -445,6 +464,9 @@ async def signup(user_data: UserSignup):
             "trial_expires": trial_expires.strftime('%B %d, %Y at %I:%M %p UTC')
         }
     )
+    
+    # Add user to SendGrid contact list for automation sequence
+    await add_contact_to_list(email, "5f1fce5f-ca63-4cc9-9ada-552d02cc662d")
     
     # Create access token
     access_token = create_access_token(data={"user_id": user_id})
