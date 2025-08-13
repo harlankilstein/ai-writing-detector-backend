@@ -13,7 +13,6 @@ from datetime import datetime, timedelta
 import re
 import httpx
 import asyncio
-import json
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from email_validator import validate_email, EmailNotValidError
@@ -83,6 +82,10 @@ class ForgotPasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     token: str
     new_password: str = Field(..., min_length=6)
+
+class FamilyMemberRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=6)
 
 class User(BaseModel):
     id: str
@@ -184,63 +187,6 @@ async def send_template_email(to_email: str, template_id: str, dynamic_data: dic
     except Exception as e:
         logger.error(f"Failed to send template email to {to_email}: {str(e)}")
         return None
-
-async def add_contact_to_list(email: str, list_id: str):
-    """Add contact to SendGrid marketing list"""
-    if not sendgrid_client:
-        logger.warning("SendGrid not configured, skipping contact list add")
-        return
-    
-    try:
-        data = {
-            "list_ids": [list_id],
-            "contacts": [{"email": email}]
-        }
-        
-        response = sendgrid_client.client.marketing.contacts.put(request_body=data)
-        logger.info(f"Contact {email} added to SendGrid list {list_id}")
-        return response
-    except Exception as e:
-        logger.error(f"Failed to add contact {email} to list: {str(e)}")
-        return None
-
-async def remove_contact_from_list(email: str, list_id: str):
-    """Remove contact from SendGrid marketing list"""
-    if not sendgrid_client:
-        logger.warning("SendGrid not configured, skipping contact list removal")
-        return
-    
-    try:
-        # First get the contact ID
-        search_response = sendgrid_client.client.marketing.contacts.search.post(request_body={"query": f"email='{email}'"})
-        search_result = json.loads(search_response.body)
-        
-        if search_result.get('result') and len(search_result['result']) > 0:
-            contact_id = search_result['result'][0]['id']
-            
-            # Remove contact from specific list
-            data = {"list_ids": [list_id]}
-            response = sendgrid_client.client.marketing.lists._(list_id).contacts.delete(
-                query_params={"contact_ids": contact_id}
-            )
-            logger.info(f"Contact {email} removed from SendGrid list {list_id}")
-            return response
-        else:
-            logger.warning(f"Contact {email} not found in SendGrid")
-    except Exception as e:
-        logger.error(f"Failed to remove contact {email} from list: {str(e)}")
-        return None
-
-async def move_user_to_buyers_list(email: str):
-    """Move user from trial list to buyers list and send welcome email"""
-    # Remove from trial list
-    await remove_contact_from_list(email, "5f1fce5f-ca63-4cc9-9ada-552d02cc662d")
-    
-    # Add to buyers list
-    await add_contact_to_list(email, "32980e0b-0368-4733-a56d-e15140daaa60")
-    
-    # Send buyer welcome email
-    await send_template_email(email, "d-1d524cfe53a6465c8d9086783d55a483")
 
 def extract_google_doc_id(url: str) -> Optional[str]:
     """Extract document ID from Google Docs URL"""
@@ -445,7 +391,19 @@ async def fetch_google_doc_content(doc_id: str) -> dict:
 
 def check_user_access(user: dict) -> bool:
     """Check if user has access based on subscription status"""
-    if user["subscription_status"] in ["pro", "business", "active"]:
+    # Family members get unlimited access
+    family_members = [
+        "drkilstein@gmail.com",
+        "shmuelkilstein@gmail.com", 
+        "joeysosin@gmail.com",
+        "jacobsosin@gmail.com"
+    ]
+    
+    # If user is a family member, they get unlimited access
+    if user["email"] in family_members:
+        return True
+    
+    if user["subscription_status"] in ["pro", "business", "active", "family_member"]:
         return True
     
     if user["subscription_status"] == "trial":
@@ -503,9 +461,6 @@ async def signup(user_data: UserSignup):
             "trial_expires": trial_expires.strftime('%B %d, %Y at %I:%M %p UTC')
         }
     )
-    
-    # Add user to SendGrid contact list for automation sequence
-    await add_contact_to_list(email, "5f1fce5f-ca63-4cc9-9ada-552d02cc662d")
     
     # Create access token
     access_token = create_access_token(data={"user_id": user_id})
@@ -582,7 +537,7 @@ async def forgot_password(request: ForgotPasswordRequest):
     # Send password reset email
     if sendgrid_client:
         try:
-            reset_link = f"https://genuineaf.ai/reset-password?token={reset_token}"
+            reset_link = f"https://ai-writing-detector.onrender.com/reset-password?token={reset_token}"
             
             message = Mail(
                 from_email=FROM_EMAIL,
@@ -693,6 +648,83 @@ async def analyze_google_doc(request: GoogleDocRequest, current_user: dict = Dep
     
     return result
 
+# FAMILY MEMBER MANAGEMENT ENDPOINTS
+@app.post("/api/admin/create-family-member", response_model=Token)
+async def create_family_member(request: FamilyMemberRequest, current_user: dict = Depends(get_current_user)):
+    # Only allow drkilstein@gmail.com to create family members
+    if current_user["email"] != "drkilstein@gmail.com":
+        raise HTTPException(status_code=403, detail="Only family admin can create family members")
+    
+    try:
+        # Validate email
+        validated_email = validate_email(request.email)
+        email = validated_email.email
+    except EmailNotValidError:
+        raise HTTPException(status_code=400, detail="Invalid email address")
+    
+    # Check if user already exists
+    existing_user = await db.users.find_one({"email": email})
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Hash password
+    hashed_password = get_password_hash(request.password)
+    
+    # Create family member with unlimited access
+    user_id = str(uuid.uuid4())
+    
+    user_doc = {
+        "id": user_id,
+        "email": email,
+        "password_hash": hashed_password,
+        "subscription_status": "family_member",  # Special status for family
+        "stripe_customer_id": None,
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow()
+    }
+    
+    await db.users.insert_one(user_doc)
+    
+    # Create access token
+    access_token = create_access_token(data={"user_id": user_id})
+    
+    # Return user data
+    user_response = User(
+        id=user_id,
+        email=email,
+        subscription_status="family_member",
+        created_at=user_doc["created_at"],
+        updated_at=user_doc["updated_at"]
+    )
+    
+    logger.info(f"Family member account created: {email}")
+    return Token(access_token=access_token, token_type="bearer", user=user_response)
+
+@app.get("/api/admin/family-members")
+async def list_family_members(current_user: dict = Depends(get_current_user)):
+    # Only allow drkilstein@gmail.com to view family members
+    if current_user["email"] != "drkilstein@gmail.com":
+        raise HTTPException(status_code=403, detail="Only family admin can view family members")
+    
+    family_members = [
+        "drkilstein@gmail.com",
+        "shmuelkilstein@gmail.com", 
+        "joeysosin@gmail.com",
+        "jacobsosin@gmail.com"
+    ]
+    
+    # Get all family member accounts
+    cursor = db.users.find({"email": {"$in": family_members}})
+    members = []
+    async for user in cursor:
+        members.append({
+            "email": user["email"],
+            "subscription_status": user["subscription_status"],
+            "created_at": user["created_at"]
+        })
+    
+    return {"family_members": members}
+
 # Stripe Routes
 @app.get("/api/stripe/config")
 async def get_stripe_config():
@@ -797,9 +829,6 @@ async def stripe_webhook(request: Request):
             # Get user for email
             user = await db.users.find_one({"id": user_id})
             if user:
-                # Move user to buyers list and send welcome email
-                await move_user_to_buyers_list(user['email'])
-                
                 # Send confirmation email
                 plan_name = "Business Plan" if subscription_status == "business" else "Pro Plan"
                 confirmation_html = f"""
