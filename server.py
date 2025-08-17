@@ -116,6 +116,13 @@ def verify_password(plain_password, hashed_password):
 def get_password_hash(password):
     return pwd_context.hash(password)
 
+def get_first_name(full_name: str) -> str:
+    """More robust first name extraction"""
+    if not full_name or not full_name.strip() or full_name.strip() == "No name field":
+        return "there"  # Fallback greeting
+    parts = full_name.strip().split()
+    return parts[0] if parts else full_name.strip()
+
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
     if expires_delta:
@@ -166,6 +173,42 @@ async def send_email(to_email: str, subject: str, html_content: str):
         return response
     except Exception as e:
         logger.error(f"Failed to send email to {to_email}: {str(e)}")
+        return None
+
+async def send_template_email_safe(to_email: str, template_id: str, user_name: str = None, additional_data: dict = None):
+    """Send email using SendGrid template with safe fallbacks for missing name data"""
+    if not sendgrid_client:
+        logger.warning("SendGrid not configured, skipping template email send")
+        return
+    
+    try:
+        # Prepare template data with safe fallbacks
+        template_data = {}
+        
+        # Handle name fields safely - check for None, empty string, or "No name field"
+        if user_name and user_name.strip() and user_name != "No name field":
+            template_data["name"] = user_name.strip()
+            template_data["first_name"] = get_first_name(user_name)
+        else:
+            template_data["name"] = "there"
+            template_data["first_name"] = "there"
+        
+        # Add any additional data
+        if additional_data:
+            template_data.update(additional_data)
+        
+        message = Mail(
+            from_email=(FROM_EMAIL, FROM_NAME),
+            to_emails=to_email
+        )
+        message.template_id = template_id
+        message.dynamic_template_data = template_data
+            
+        response = sendgrid_client.send(message)
+        logger.info(f"Template email sent successfully to {to_email} using template {template_id} with data: {template_data}")
+        return response
+    except Exception as e:
+        logger.error(f"Failed to send template email to {to_email}: {str(e)}")
         return None
 
 async def send_template_email(to_email: str, template_id: str, dynamic_data: dict = None):
@@ -456,15 +499,12 @@ async def signup(user_data: UserSignup):
     
     await db.users.insert_one(user_doc)
     
-    # Send welcome email using SendGrid template
-    await send_template_email(
-        email, 
+    # Send welcome email using SendGrid template with safe name handling
+    await send_template_email_safe(
+        email,
         "d-1070bc39b3e741748d103ae177d8537a",  # GenuineAF Day 1 Welcome template
-        {
-            "name": user_data.name,
-            "first_name": user_data.name.split()[0] if user_data.name.split() else user_data.name,
-            "trial_expires": trial_expires.strftime('%B %d, %Y at %I:%M %p UTC')
-        }
+        user_data.name,
+        {"trial_expires": trial_expires.strftime('%B %d, %Y at %I:%M %p UTC')}
     )
     
     # Create access token
@@ -968,6 +1008,59 @@ async def get_subscription_info(current_user: dict = Depends(get_current_user)):
             return {"has_active_subscription": False}
     
     return {"has_active_subscription": False}
+
+# NEW ENDPOINT: Send welcome emails to existing users without names
+@app.post("/api/admin/send-welcome-emails")
+async def send_welcome_emails_to_existing_users(current_user: dict = Depends(get_current_user)):
+    """Send welcome emails to existing users who don't have names and haven't received emails"""
+    # Only allow drkilstein@gmail.com to send emails
+    if current_user["email"] != "drkilstein@gmail.com":
+        raise HTTPException(status_code=403, detail="Only admin can send welcome emails")
+    
+    try:
+        # Find users without names who signed up recently
+        users_collection = db.users
+        cursor = users_collection.find({
+            "$or": [
+                {"name": {"$exists": False}},
+                {"name": ""},
+                {"name": "No name field"}
+            ]
+        })
+        
+        users_to_email = []
+        async for user in cursor:
+            users_to_email.append(user)
+        
+        results = []
+        for user in users_to_email:
+            try:
+                # Send welcome email with safe fallbacks
+                response = await send_template_email_safe(
+                    user["email"],
+                    "d-1070bc39b3e741748d103ae177d8537a",  # Welcome template
+                    user.get("name"),
+                    {
+                        "trial_expires": user.get("trial_expires", datetime.utcnow() + timedelta(days=3)).strftime('%B %d, %Y at %I:%M %p UTC')
+                    }
+                )
+                
+                if response:
+                    results.append({"email": user["email"], "status": "sent", "response_code": getattr(response, 'status_code', 'unknown')})
+                else:
+                    results.append({"email": user["email"], "status": "failed", "error": "No response from SendGrid"})
+                    
+            except Exception as e:
+                results.append({"email": user["email"], "status": "error", "error": str(e)})
+        
+        return {
+            "message": f"Attempted to send welcome emails to {len(users_to_email)} users",
+            "results": results
+        }
+        
+    except Exception as e:
+        logger.error(f"Error sending welcome emails: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to send emails: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
