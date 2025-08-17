@@ -38,7 +38,23 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 FROM_EMAIL = os.getenv("FROM_EMAIL", "support@genuineaf.ai")
 FROM_NAME = os.getenv("FROM_NAME", "AI Writing Detector")
-sendgrid_client = SendGridAPIClient(api_key=SENDGRID_API_KEY) if SENDGRID_API_KEY else None
+
+# Setup logging first
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Add debugging for SendGrid initialization
+if not SENDGRID_API_KEY:
+    logger.error("CRITICAL: SENDGRID_API_KEY environment variable not set!")
+    sendgrid_client = None
+else:
+    logger.info(f"SendGrid API key loaded: {SENDGRID_API_KEY[:10]}...")
+    try:
+        sendgrid_client = SendGridAPIClient(api_key=SENDGRID_API_KEY)
+        logger.info("SendGrid client initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize SendGrid client: {str(e)}")
+        sendgrid_client = None
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -48,10 +64,6 @@ security = HTTPBearer()
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
-
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 app = FastAPI(title="AI Writing Detector API", version="1.0.0")
 
@@ -148,10 +160,11 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 async def send_email(to_email: str, subject: str, html_content: str):
     """Send email using SendGrid"""
     if not sendgrid_client:
-        logger.warning("SendGrid not configured, skipping email send")
-        return
+        logger.error(f"SENDGRID ERROR: Cannot send email to {to_email} - SendGrid not configured")
+        return None
     
     try:
+        logger.info(f"SENDGRID: Attempting to send email to {to_email}")
         message = Mail(
             from_email=(FROM_EMAIL, FROM_NAME),
             to_emails=to_email,
@@ -159,19 +172,20 @@ async def send_email(to_email: str, subject: str, html_content: str):
             html_content=html_content
         )
         response = sendgrid_client.send(message)
-        logger.info(f"Email sent successfully to {to_email}")
+        logger.info(f"SENDGRID SUCCESS: Email sent to {to_email}, Status: {response.status_code}")
         return response
     except Exception as e:
-        logger.error(f"Failed to send email to {to_email}: {str(e)}")
+        logger.error(f"SENDGRID ERROR: Failed to send email to {to_email}: {str(e)}")
         return None
 
 async def send_template_email(to_email: str, template_id: str, dynamic_data: dict = None):
     """Send email using SendGrid template"""
     if not sendgrid_client:
-        logger.warning("SendGrid not configured, skipping template email send")
-        return
+        logger.error(f"SENDGRID ERROR: Cannot send template email to {to_email} - SendGrid not configured")
+        return None
     
     try:
+        logger.info(f"SENDGRID: Attempting to send template email to {to_email} using template {template_id}")
         message = Mail(
             from_email=(FROM_EMAIL, FROM_NAME),
             to_emails=to_email
@@ -180,12 +194,13 @@ async def send_template_email(to_email: str, template_id: str, dynamic_data: dic
         
         if dynamic_data:
             message.dynamic_template_data = dynamic_data
+            logger.info(f"SENDGRID: Template data: {dynamic_data}")
             
         response = sendgrid_client.send(message)
-        logger.info(f"Template email sent successfully to {to_email} using template {template_id}")
+        logger.info(f"SENDGRID SUCCESS: Template email sent to {to_email}, Status: {response.status_code}")
         return response
     except Exception as e:
-        logger.error(f"Failed to send template email to {to_email}: {str(e)}")
+        logger.error(f"SENDGRID ERROR: Failed to send template email to {to_email}: {str(e)}")
         return None
 
 def extract_google_doc_id(url: str) -> Optional[str]:
@@ -453,14 +468,21 @@ async def signup(user_data: UserSignup):
     
     await db.users.insert_one(user_doc)
     
-    # Send welcome email using SendGrid template
-    await send_template_email(
+    # Send welcome email using SendGrid template with enhanced debugging
+    logger.info(f"SIGNUP: About to send welcome email to {email}")
+    email_result = await send_template_email(
         email, 
         "d-1070bc39b3e741748d103ae177d8537a",  # GenuineAF Day 1 Welcome template
         {
             "trial_expires": trial_expires.strftime('%B %d, %Y at %I:%M %p UTC')
         }
     )
+    
+    # Enhanced email debugging
+    if email_result is None:
+        logger.error(f"SIGNUP ERROR: Welcome email failed for {email}")
+    else:
+        logger.info(f"SIGNUP SUCCESS: Welcome email queued for {email}, Response: {email_result}")
     
     # Create access token
     access_token = create_access_token(data={"user_id": user_id})
