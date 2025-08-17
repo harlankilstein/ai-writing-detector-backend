@@ -876,6 +876,33 @@ async def stripe_webhook(request: Request):
     
     return {"status": "success"}
 
+@app.post("/api/sendgrid/webhook")
+async def sendgrid_webhook(request: Request):
+    """Handle SendGrid delivery events"""
+    try:
+        events = await request.json()
+        
+        # Process delivery events
+        for event in events:
+            if event.get('event') == 'delivered':
+                email = event.get('email')
+                timestamp = event.get('timestamp')
+                logger.info(f"Email delivered successfully to {email} at {timestamp}")
+                
+                # Optional: Store delivery confirmation in database
+                # await db.email_logs.insert_one({
+                #     "email": email,
+                #     "status": "delivered", 
+                #     "timestamp": datetime.fromtimestamp(timestamp),
+                #     "sendgrid_event": event
+                # })
+        
+        return {"status": "success"}
+        
+    except Exception as e:
+        logger.error(f"SendGrid webhook error: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
 @app.get("/api/stripe/subscription")
 async def get_subscription_info(current_user: dict = Depends(get_current_user)):
     if current_user.get("stripe_customer_id"):
