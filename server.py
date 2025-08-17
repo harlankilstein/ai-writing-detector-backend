@@ -36,7 +36,7 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 
 # SendGrid configuration
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-FROM_EMAIL = os.getenv("FROM_EMAIL", "otcpublishing@gmail.com")
+FROM_EMAIL = os.getenv("FROM_EMAIL", "support@genuineaf.ai")
 FROM_NAME = os.getenv("FROM_NAME", "AI Writing Detector")
 sendgrid_client = SendGridAPIClient(api_key=SENDGRID_API_KEY) if SENDGRID_API_KEY else None
 
