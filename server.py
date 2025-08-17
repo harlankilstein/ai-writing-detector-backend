@@ -38,23 +38,7 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 FROM_EMAIL = os.getenv("FROM_EMAIL", "support@genuineaf.ai")
 FROM_NAME = os.getenv("FROM_NAME", "AI Writing Detector")
-
-# Setup logging first
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Add debugging for SendGrid initialization
-if not SENDGRID_API_KEY:
-    logger.error("CRITICAL: SENDGRID_API_KEY environment variable not set!")
-    sendgrid_client = None
-else:
-    logger.info(f"SendGrid API key loaded: {SENDGRID_API_KEY[:10]}...")
-    try:
-        sendgrid_client = SendGridAPIClient(api_key=SENDGRID_API_KEY)
-        logger.info("SendGrid client initialized successfully")
-    except Exception as e:
-        logger.error(f"Failed to initialize SendGrid client: {str(e)}")
-        sendgrid_client = None
+sendgrid_client = SendGridAPIClient(api_key=SENDGRID_API_KEY) if SENDGRID_API_KEY else None
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -64,6 +48,10 @@ security = HTTPBearer()
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="AI Writing Detector API", version="1.0.0")
 
@@ -80,6 +68,7 @@ app.add_middleware(
 class UserSignup(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=6)
+    name: str = Field(..., min_length=1, max_length=100)
 
 class UserLogin(BaseModel):
     email: EmailStr
@@ -98,10 +87,12 @@ class ResetPasswordRequest(BaseModel):
 class FamilyMemberRequest(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=6)
+    name: str = Field(..., min_length=1, max_length=100)
 
 class User(BaseModel):
     id: str
     email: str
+    name: str
     subscription_status: str
     trial_expires: Optional[datetime] = None
     stripe_customer_id: Optional[str] = None
@@ -160,11 +151,10 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 async def send_email(to_email: str, subject: str, html_content: str):
     """Send email using SendGrid"""
     if not sendgrid_client:
-        logger.error(f"SENDGRID ERROR: Cannot send email to {to_email} - SendGrid not configured")
-        return None
+        logger.warning("SendGrid not configured, skipping email send")
+        return
     
     try:
-        logger.info(f"SENDGRID: Attempting to send email to {to_email}")
         message = Mail(
             from_email=(FROM_EMAIL, FROM_NAME),
             to_emails=to_email,
@@ -172,20 +162,19 @@ async def send_email(to_email: str, subject: str, html_content: str):
             html_content=html_content
         )
         response = sendgrid_client.send(message)
-        logger.info(f"SENDGRID SUCCESS: Email sent to {to_email}, Status: {response.status_code}")
+        logger.info(f"Email sent successfully to {to_email}")
         return response
     except Exception as e:
-        logger.error(f"SENDGRID ERROR: Failed to send email to {to_email}: {str(e)}")
+        logger.error(f"Failed to send email to {to_email}: {str(e)}")
         return None
 
 async def send_template_email(to_email: str, template_id: str, dynamic_data: dict = None):
     """Send email using SendGrid template"""
     if not sendgrid_client:
-        logger.error(f"SENDGRID ERROR: Cannot send template email to {to_email} - SendGrid not configured")
-        return None
+        logger.warning("SendGrid not configured, skipping template email send")
+        return
     
     try:
-        logger.info(f"SENDGRID: Attempting to send template email to {to_email} using template {template_id}")
         message = Mail(
             from_email=(FROM_EMAIL, FROM_NAME),
             to_emails=to_email
@@ -194,13 +183,12 @@ async def send_template_email(to_email: str, template_id: str, dynamic_data: dic
         
         if dynamic_data:
             message.dynamic_template_data = dynamic_data
-            logger.info(f"SENDGRID: Template data: {dynamic_data}")
             
         response = sendgrid_client.send(message)
-        logger.info(f"SENDGRID SUCCESS: Template email sent to {to_email}, Status: {response.status_code}")
+        logger.info(f"Template email sent successfully to {to_email} using template {template_id}")
         return response
     except Exception as e:
-        logger.error(f"SENDGRID ERROR: Failed to send template email to {to_email}: {str(e)}")
+        logger.error(f"Failed to send template email to {to_email}: {str(e)}")
         return None
 
 def extract_google_doc_id(url: str) -> Optional[str]:
@@ -233,7 +221,7 @@ def extract_published_doc_content(html_content: str) -> Optional[str]:
         content_patterns = [
             r'<div[^>]*class="[^"]*doc-content[^"]*"[^>]*>(.*?)</div>',
             r'<div[^>]*id="contents"[^>]*>(.*?)</div>',
-            r'<div[^>]*class="[^"]*document[^"]*"[^>]*>(.*?</div>',
+            r'<div[^>]*class="[^"]*document[^"]*"[^>]*>(.*?)</div>',
             r'<body[^>]*>(.*?)</body>'
         ]
         
@@ -414,11 +402,10 @@ def check_user_access(user: dict) -> bool:
         "jacobsosin@gmail.com"
     ]
     
-    # If user is a family member, they get unlimited access
     if user["email"] in family_members:
         return True
     
-    if user["subscription_status"] in ["pro", "business", "active", "family_member"]:
+    if user["subscription_status"] in ["pro", "business", "active"]:
         return True
     
     if user["subscription_status"] == "trial":
@@ -458,6 +445,7 @@ async def signup(user_data: UserSignup):
     user_doc = {
         "id": user_id,
         "email": email,
+        "name": user_data.name,
         "password_hash": hashed_password,
         "subscription_status": "trial",
         "trial_expires": trial_expires,
@@ -468,21 +456,16 @@ async def signup(user_data: UserSignup):
     
     await db.users.insert_one(user_doc)
     
-    # Send welcome email using SendGrid template with enhanced debugging
-    logger.info(f"SIGNUP: About to send welcome email to {email}")
-    email_result = await send_template_email(
+    # Send welcome email using SendGrid template
+    await send_template_email(
         email, 
         "d-1070bc39b3e741748d103ae177d8537a",  # GenuineAF Day 1 Welcome template
         {
+            "name": user_data.name,
+            "first_name": user_data.name.split()[0] if user_data.name.split() else user_data.name,
             "trial_expires": trial_expires.strftime('%B %d, %Y at %I:%M %p UTC')
         }
     )
-    
-    # Enhanced email debugging
-    if email_result is None:
-        logger.error(f"SIGNUP ERROR: Welcome email failed for {email}")
-    else:
-        logger.info(f"SIGNUP SUCCESS: Welcome email queued for {email}, Response: {email_result}")
     
     # Create access token
     access_token = create_access_token(data={"user_id": user_id})
@@ -491,6 +474,7 @@ async def signup(user_data: UserSignup):
     user_response = User(
         id=user_id,
         email=email,
+        name=user_data.name,
         subscription_status="trial",
         trial_expires=trial_expires,
         created_at=user_doc["created_at"],
@@ -518,6 +502,7 @@ async def login(user_data: UserLogin):
     user_response = User(
         id=user["id"],
         email=user["email"],
+        name=user.get("name", ""),  # Handle existing users without names
         subscription_status=user["subscription_status"],
         trial_expires=user.get("trial_expires"),
         stripe_customer_id=user.get("stripe_customer_id"),
@@ -623,6 +608,7 @@ async def get_current_user_info(current_user: dict = Depends(get_current_user)):
     return User(
         id=current_user["id"],
         email=current_user["email"],
+        name=current_user.get("name", ""),  # Handle existing users without names
         subscription_status=current_user["subscription_status"],
         trial_expires=current_user.get("trial_expires"),
         stripe_customer_id=current_user.get("stripe_customer_id"),
@@ -669,83 +655,6 @@ async def analyze_google_doc(request: GoogleDocRequest, current_user: dict = Dep
             )
     
     return result
-
-# FAMILY MEMBER MANAGEMENT ENDPOINTS
-@app.post("/api/admin/create-family-member", response_model=Token)
-async def create_family_member(request: FamilyMemberRequest, current_user: dict = Depends(get_current_user)):
-    # Only allow drkilstein@gmail.com to create family members
-    if current_user["email"] != "drkilstein@gmail.com":
-        raise HTTPException(status_code=403, detail="Only family admin can create family members")
-    
-    try:
-        # Validate email
-        validated_email = validate_email(request.email)
-        email = validated_email.email
-    except EmailNotValidError:
-        raise HTTPException(status_code=400, detail="Invalid email address")
-    
-    # Check if user already exists
-    existing_user = await db.users.find_one({"email": email})
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    # Hash password
-    hashed_password = get_password_hash(request.password)
-    
-    # Create family member with unlimited access
-    user_id = str(uuid.uuid4())
-    
-    user_doc = {
-        "id": user_id,
-        "email": email,
-        "password_hash": hashed_password,
-        "subscription_status": "family_member",  # Special status for family
-        "stripe_customer_id": None,
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow()
-    }
-    
-    await db.users.insert_one(user_doc)
-    
-    # Create access token
-    access_token = create_access_token(data={"user_id": user_id})
-    
-    # Return user data
-    user_response = User(
-        id=user_id,
-        email=email,
-        subscription_status="family_member",
-        created_at=user_doc["created_at"],
-        updated_at=user_doc["updated_at"]
-    )
-    
-    logger.info(f"Family member account created: {email}")
-    return Token(access_token=access_token, token_type="bearer", user=user_response)
-
-@app.get("/api/admin/family-members")
-async def list_family_members(current_user: dict = Depends(get_current_user)):
-    # Only allow drkilstein@gmail.com to view family members
-    if current_user["email"] != "drkilstein@gmail.com":
-        raise HTTPException(status_code=403, detail="Only family admin can view family members")
-    
-    family_members = [
-        "drkilstein@gmail.com",
-        "shmuelkilstein@gmail.com", 
-        "joeysosin@gmail.com",
-        "jacobsosin@gmail.com"
-    ]
-    
-    # Get all family member accounts
-    cursor = db.users.find({"email": {"$in": family_members}})
-    members = []
-    async for user in cursor:
-        members.append({
-            "email": user["email"],
-            "subscription_status": user["subscription_status"],
-            "created_at": user["created_at"]
-        })
-    
-    return {"family_members": members}
 
 # Stripe Routes
 @app.get("/api/stripe/config")
@@ -900,22 +809,146 @@ async def stripe_webhook(request: Request):
 
 @app.post("/api/sendgrid/webhook")
 async def sendgrid_webhook(request: Request):
-    """Handle SendGrid delivery events"""
+    """Handle SendGrid webhook events"""
     try:
-        events = await request.json()
+        payload = await request.body()
         
-        # Process delivery events
+        # Parse the webhook payload
+        try:
+            events = await request.json()
+        except Exception as e:
+            logger.error(f"Failed to parse SendGrid webhook payload: {str(e)}")
+            raise HTTPException(status_code=400, detail="Invalid JSON payload")
+        
+        # Handle multiple events (SendGrid can send multiple events in one request)
+        if not isinstance(events, list):
+            events = [events]
+        
+        processed_events = []
+        
         for event in events:
-            if event.get('event') == 'delivered':
-                email = event.get('email')
-                timestamp = event.get('timestamp')
-                logger.info(f"Email delivered successfully to {email} at {timestamp}")
+            event_type = event.get('event')
+            email = event.get('email')
+            timestamp = event.get('timestamp')
+            sg_event_id = event.get('sg_event_id')
+            sg_message_id = event.get('sg_message_id')
+            
+            logger.info(f"SendGrid webhook event: {event_type} for {email} at {timestamp}")
+            
+            # Process different event types
+            if event_type == 'delivered':
+                logger.info(f"Email delivered successfully to {email}")
+            elif event_type == 'bounce':
+                logger.warning(f"Email bounced for {email}: {event.get('reason', 'Unknown reason')}")
+            elif event_type == 'dropped':
+                logger.warning(f"Email dropped for {email}: {event.get('reason', 'Unknown reason')}")
+            elif event_type == 'spam_report':
+                logger.warning(f"Spam report for {email}")
+            elif event_type == 'unsubscribe':
+                logger.info(f"Unsubscribe request from {email}")
+            elif event_type == 'group_unsubscribe':
+                logger.info(f"Group unsubscribe request from {email}")
+            elif event_type == 'open':
+                logger.info(f"Email opened by {email}")
+            elif event_type == 'click':
+                logger.info(f"Email link clicked by {email}")
+            
+            processed_events.append({
+                "event": event_type,
+                "email": email,
+                "processed": True,
+                "timestamp": timestamp
+            })
         
-        return {"status": "success"}
+        return {
+            "status": "success",
+            "processed_events": len(processed_events),
+            "events": processed_events
+        }
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"SendGrid webhook error: {str(e)}")
-        return {"status": "error", "message": str(e)}
+        logger.error(f"SendGrid webhook processing error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Webhook processing failed")
+
+@app.post("/api/admin/create-family-member", response_model=Token)
+async def create_family_member(request: FamilyMemberRequest, current_user: dict = Depends(get_current_user)):
+    # Only allow drkilstein@gmail.com to create family members
+    if current_user["email"] != "drkilstein@gmail.com":
+        raise HTTPException(status_code=403, detail="Only family admin can create family members")
+    
+    try:
+        # Validate email
+        validated_email = validate_email(request.email)
+        email = validated_email.email
+    except EmailNotValidError:
+        raise HTTPException(status_code=400, detail="Invalid email address")
+    
+    # Check if user already exists
+    existing_user = await db.users.find_one({"email": email})
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Hash password
+    hashed_password = get_password_hash(request.password)
+    
+    # Create family member with pro status (unlimited access)
+    user_id = str(uuid.uuid4())
+    
+    user_doc = {
+        "id": user_id,
+        "email": email,
+        "name": request.name,
+        "password_hash": hashed_password,
+        "subscription_status": "family_member",  # Special status for family
+        "stripe_customer_id": None,
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow()
+    }
+    
+    await db.users.insert_one(user_doc)
+    
+    # Create access token
+    access_token = create_access_token(data={"user_id": user_id})
+    
+    # Return user data
+    user_response = User(
+        id=user_id,
+        email=email,
+        name=request.name,
+        subscription_status="family_member",
+        created_at=user_doc["created_at"],
+        updated_at=user_doc["updated_at"]
+    )
+    
+    logger.info(f"Family member account created: {email}")
+    return Token(access_token=access_token, token_type="bearer", user=user_response)
+
+@app.get("/api/admin/family-members")
+async def list_family_members(current_user: dict = Depends(get_current_user)):
+    # Only allow drkilstein@gmail.com to view family members
+    if current_user["email"] != "drkilstein@gmail.com":
+        raise HTTPException(status_code=403, detail="Only family admin can view family members")
+    
+    family_members = [
+        "drkilstein@gmail.com",
+        "shmuelkilstein@gmail.com", 
+        "joeysosin@gmail.com",
+        "jacobsosin@gmail.com"
+    ]
+    
+    # Get all family member accounts
+    cursor = db.users.find({"email": {"$in": family_members}})
+    members = []
+    async for user in cursor:
+        members.append({
+            "email": user["email"],
+            "subscription_status": user["subscription_status"],
+            "created_at": user["created_at"]
+        })
+    
+    return {"family_members": members}
 
 @app.get("/api/stripe/subscription")
 async def get_subscription_info(current_user: dict = Depends(get_current_user)):
