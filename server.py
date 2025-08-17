@@ -437,20 +437,23 @@ async def fetch_google_doc_content(doc_id: str) -> dict:
 
 def check_user_access(user: dict) -> bool:
     """Check if user has access based on subscription status"""
-    # Family members get unlimited access
+    # Family members get unlimited access - UPDATED WITH NAMES
     family_members = [
-        "drkilstein@gmail.com",
-        "shmuelkilstein@gmail.com", 
-        "joeysosin@gmail.com",
-        "jacobsosin@gmail.com"
+        "drkilstein@gmail.com",      # Harlan (Admin)
+        "shmuelkilstein@gmail.com",  # Shmuel  
+        "joeysosin@gmail.com",       # Joey
+        "jacobsosin@gmail.com"       # Jacob
     ]
     
+    # Family members bypass all restrictions
     if user["email"] in family_members:
         return True
     
-    if user["subscription_status"] in ["pro", "business", "active"]:
+    # Subscription status checks - UPDATED TO INCLUDE family_admin and family_member
+    if user["subscription_status"] in ["pro", "business", "active", "family_admin", "family_member"]:
         return True
     
+    # Trial check
     if user["subscription_status"] == "trial":
         trial_expires = user.get("trial_expires")
         if trial_expires and isinstance(trial_expires, datetime):
@@ -972,10 +975,10 @@ async def list_family_members(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Only family admin can view family members")
     
     family_members = [
-        "drkilstein@gmail.com",
-        "shmuelkilstein@gmail.com", 
-        "joeysosin@gmail.com",
-        "jacobsosin@gmail.com"
+        "drkilstein@gmail.com",      # Harlan (Admin)
+        "shmuelkilstein@gmail.com",  # Shmuel  
+        "joeysosin@gmail.com",       # Joey
+        "jacobsosin@gmail.com"       # Jacob
     ]
     
     # Get all family member accounts
