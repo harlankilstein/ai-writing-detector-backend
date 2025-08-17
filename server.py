@@ -233,7 +233,7 @@ def extract_published_doc_content(html_content: str) -> Optional[str]:
         content_patterns = [
             r'<div[^>]*class="[^"]*doc-content[^"]*"[^>]*>(.*?)</div>',
             r'<div[^>]*id="contents"[^>]*>(.*?)</div>',
-            r'<div[^>]*class="[^"]*document[^"]*"[^>]*>(.*?)</div>',
+            r'<div[^>]*class="[^"]*document[^"]*"[^>]*>(.*?</div>',
             r'<body[^>]*>(.*?)</body>'
         ]
         
@@ -910,14 +910,6 @@ async def sendgrid_webhook(request: Request):
                 email = event.get('email')
                 timestamp = event.get('timestamp')
                 logger.info(f"Email delivered successfully to {email} at {timestamp}")
-                
-                # Optional: Store delivery confirmation in database
-                # await db.email_logs.insert_one({
-                #     "email": email,
-                #     "status": "delivered", 
-                #     "timestamp": datetime.fromtimestamp(timestamp),
-                #     "sendgrid_event": event
-                # })
         
         return {"status": "success"}
         
